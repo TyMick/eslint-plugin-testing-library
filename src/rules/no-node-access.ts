@@ -19,20 +19,16 @@ import type { Type, TypeChecker } from 'typescript';
 const RULE_NAME = 'no-node-access';
 
 // `Node` is the abstract base class for all DOM objects that expose traversal
-// properties (children, firstChild, parentNode, etc.). Any type whose hierarchy
-// includes `Node` is a genuine DOM node access. `Window` and `EventTarget` are
-// intentionally excluded: they do not expose node-traversal properties, so
-// treating them as "DOM nodes" here would cause false negatives without benefit.
-const DOM_NODE_TYPE_NAMES = new Set([
-	'Node',
-	'Element',
-	'HTMLElement',
-	'SVGElement',
-	'Document',
-	'ShadowRoot',
-	'DocumentFragment',
-]);
-
+// properties (children, firstChild, parentNode, etc.). Any object whose type
+// hierarchy includes `Node` is a genuine DOM node access.
+//
+// `checker.getBaseTypes()` returns only *direct* parent types, so recursion is
+// required to walk up to `Node` from deeply-nested subtypes (e.g.
+// HTMLDivElement → HTMLElement → Element → Node).
+//
+// Base types can be non-interface types (e.g. EventTarget extends an object
+// literal `__type`). The `isClassOrInterface()` guard is therefore necessary
+// before calling `checker.getBaseTypes()`.
 function isDOMNodeType(type: Type, checker: TypeChecker): boolean {
 	// Handle union types — if any constituent is a DOM type, treat as DOM
 	if (type.isUnion()) {
@@ -40,18 +36,14 @@ function isDOMNodeType(type: Type, checker: TypeChecker): boolean {
 	}
 
 	const symbol = type.getSymbol() ?? type.aliasSymbol;
-	if (symbol && DOM_NODE_TYPE_NAMES.has(symbol.getName())) {
+	if (symbol?.getName() === 'Node') {
 		return true;
 	}
 
-	// Walk base types recursively. isClassOrInterface() narrows to InterfaceType
-	// (the only kind of type that has base types), avoiding an unsafe cast.
+	// Walk base types recursively. isClassOrInterface() narrows to InterfaceType,
+	// the only kind for which checker.getBaseTypes() is valid.
 	const baseTypes = type.isClassOrInterface() ? checker.getBaseTypes(type) : [];
-	if (baseTypes.length > 0) {
-		return baseTypes.some((base) => isDOMNodeType(base, checker));
-	}
-
-	return false;
+	return baseTypes.some((base) => isDOMNodeType(base, checker));
 }
 
 export type MessageIds = 'noNodeAccess';
