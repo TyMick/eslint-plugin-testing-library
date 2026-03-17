@@ -1,4 +1,4 @@
-import { ASTUtils } from '@typescript-eslint/utils';
+import { ASTUtils, ESLintUtils } from '@typescript-eslint/utils';
 
 import { createTestingLibraryRule } from '../create-testing-library-rule';
 import {
@@ -14,8 +14,46 @@ import {
 } from '../utils';
 
 import type { TSESTree } from '@typescript-eslint/utils';
+import type * as ts from 'typescript';
 
 const RULE_NAME = 'no-node-access';
+
+// Core DOM interfaces whose names are used to identify DOM node types.
+// If an accessed object's TypeScript type is (or extends) one of these, the
+// rule considers it a genuine DOM node and will report the access.
+// These are the root interfaces of the DOM type hierarchy in lib.dom.d.ts.
+const DOM_NODE_TYPE_NAMES = new Set([
+	'Node',
+	'Element',
+	'HTMLElement',
+	'SVGElement',
+	'EventTarget',
+	'Document',
+	'Window',
+	'ShadowRoot',
+	'DocumentFragment',
+]);
+
+function isDOMNodeType(type: ts.Type, checker: ts.TypeChecker): boolean {
+	// Handle union types — if any constituent is a DOM type, treat as DOM
+	if (type.isUnion()) {
+		return type.types.some((t) => isDOMNodeType(t, checker));
+	}
+
+	const symbol = type.getSymbol() ?? type.aliasSymbol;
+	if (symbol && DOM_NODE_TYPE_NAMES.has(symbol.getName())) {
+		return true;
+	}
+
+	// Walk base types recursively
+	const baseTypes = checker.getBaseTypes(type as ts.InterfaceType);
+	if (baseTypes.length > 0) {
+		return baseTypes.some((base) => isDOMNodeType(base, checker));
+	}
+
+	return false;
+}
+
 export type MessageIds = 'noNodeAccess';
 export type Options = [{ allowContainerFirstChild: boolean }];
 
@@ -24,7 +62,8 @@ export default createTestingLibraryRule<Options, MessageIds>({
 	meta: {
 		type: 'problem',
 		docs: {
-			description: 'Disallow direct Node access',
+			description:
+				'Disallow direct Node access. When type information is available, only flags actual DOM node access.',
 			recommendedConfig: {
 				dom: 'error',
 				angular: 'error',
@@ -75,6 +114,19 @@ export default createTestingLibraryRule<Options, MessageIds>({
 					(allReturningNode) => allReturningNode === propertyName
 				)
 			) {
+				// Type-aware guard: when TypeScript type information is available, only
+				// report if the object being accessed is actually a DOM Node type.
+				// When type info is not available, fall through to the existing behaviour.
+				const services = ESLintUtils.getParserServices(context, true);
+				if (services.program != null) {
+					const checker = services.program.getTypeChecker();
+					const tsNode = services.esTreeNodeToTSNodeMap.get(node.object);
+					const type = checker.getTypeAtLocation(tsNode);
+					if (!isDOMNodeType(type, checker)) {
+						return;
+					}
+				}
+
 				if (allowContainerFirstChild && propertyName === 'firstChild') {
 					return;
 				}

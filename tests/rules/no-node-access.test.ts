@@ -10,6 +10,29 @@ import type {
 
 const ruleTester = createRuleTester();
 
+// NOTE: The type-aware path introduced in this rule (using ESLintUtils.getParserServices
+// to check whether the accessed object is a real DOM Node type) cannot be exercised by
+// this tester because createRuleTester() does not supply a TypeScript `project`.
+// Without a tsconfig-backed Program, services.program is null and the rule falls back to
+// the existing name-based behaviour.
+//
+// A future improvement would be to add a second, typed rule-tester that passes
+// `parserOptions: { project: './tsconfig.json' }` (or uses `projectService: true`) and
+// then add valid test cases for the Slate.js / non-DOM pattern, e.g.:
+//
+//   {
+//     code: `
+//       import { render } from '@testing-library/react';
+//       // Non-DOM object with a property named 'children' — should not be flagged
+//       // when type information is available (Slate.js Editor pattern)
+//       const editor = createEditor();
+//       expect(editor.children[0].children[0]).toMatchObject({ text: 'hello' });
+//     `,
+//   },
+//
+// Until that typed tester is introduced, the type-aware path is covered by the
+// implementation's `services.program != null` guard (graceful degradation).
+
 type RuleValidTestCase = ValidTestCase<Options>;
 type RuleInvalidTestCase = InvalidTestCase<MessageIds, Options>;
 
