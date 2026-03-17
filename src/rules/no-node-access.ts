@@ -14,27 +14,26 @@ import {
 } from '../utils';
 
 import type { TSESTree } from '@typescript-eslint/utils';
-import type * as ts from 'typescript';
+import type { Type, TypeChecker } from 'typescript';
 
 const RULE_NAME = 'no-node-access';
 
-// Core DOM interfaces whose names are used to identify DOM node types.
-// If an accessed object's TypeScript type is (or extends) one of these, the
-// rule considers it a genuine DOM node and will report the access.
-// These are the root interfaces of the DOM type hierarchy in lib.dom.d.ts.
+// `Node` is the abstract base class for all DOM objects that expose traversal
+// properties (children, firstChild, parentNode, etc.). Any type whose hierarchy
+// includes `Node` is a genuine DOM node access. `Window` and `EventTarget` are
+// intentionally excluded: they do not expose node-traversal properties, so
+// treating them as "DOM nodes" here would cause false negatives without benefit.
 const DOM_NODE_TYPE_NAMES = new Set([
 	'Node',
 	'Element',
 	'HTMLElement',
 	'SVGElement',
-	'EventTarget',
 	'Document',
-	'Window',
 	'ShadowRoot',
 	'DocumentFragment',
 ]);
 
-function isDOMNodeType(type: ts.Type, checker: ts.TypeChecker): boolean {
+function isDOMNodeType(type: Type, checker: TypeChecker): boolean {
 	// Handle union types — if any constituent is a DOM type, treat as DOM
 	if (type.isUnion()) {
 		return type.types.some((t) => isDOMNodeType(t, checker));
@@ -45,8 +44,9 @@ function isDOMNodeType(type: ts.Type, checker: ts.TypeChecker): boolean {
 		return true;
 	}
 
-	// Walk base types recursively
-	const baseTypes = checker.getBaseTypes(type as ts.InterfaceType);
+	// Walk base types recursively. isClassOrInterface() narrows to InterfaceType
+	// (the only kind of type that has base types), avoiding an unsafe cast.
+	const baseTypes = type.isClassOrInterface() ? checker.getBaseTypes(type) : [];
 	if (baseTypes.length > 0) {
 		return baseTypes.some((base) => isDOMNodeType(base, checker));
 	}
