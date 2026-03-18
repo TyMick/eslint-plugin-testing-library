@@ -14,13 +14,13 @@ import {
 } from '../utils';
 
 import type { TSESTree } from '@typescript-eslint/utils';
-import type { Type, TypeChecker } from 'typescript';
+import type { Program, Type, TypeChecker } from 'typescript';
 
 const RULE_NAME = 'no-node-access';
 
 // `Node` is the abstract base class for all DOM objects that expose traversal
 // properties (children, firstChild, parentNode, etc.). Any object whose type
-// hierarchy includes `Node` is a genuine DOM node access.
+// hierarchy includes the DOM `Node` is a genuine DOM node access.
 //
 // `checker.getBaseTypes()` returns only *direct* parent types, so recursion is
 // required to walk up to `Node` from deeply-nested subtypes (e.g.
@@ -29,21 +29,38 @@ const RULE_NAME = 'no-node-access';
 // Base types can be non-interface types (e.g. EventTarget extends an object
 // literal `__type`). The `isClassOrInterface()` guard is therefore necessary
 // before calling `checker.getBaseTypes()`.
-function isDOMNodeType(type: Type, checker: TypeChecker): boolean {
+//
+// Third-party libraries (e.g. Slate.js) can also define a `Node` type. We
+// distinguish the DOM `Node` from user/library `Node` by checking that its
+// declaration comes from a TypeScript default library file (lib.dom.d.ts).
+function isDOMNodeType(
+	type: Type,
+	checker: TypeChecker,
+	program: Program
+): boolean {
 	// Handle union types — if any constituent is a DOM type, treat as DOM
 	if (type.isUnion()) {
-		return type.types.some((t) => isDOMNodeType(t, checker));
+		return type.types.some((t) => isDOMNodeType(t, checker, program));
 	}
 
 	const symbol = type.getSymbol() ?? type.aliasSymbol;
 	if (symbol?.getName() === 'Node') {
-		return true;
+		// Verify this is TypeScript's built-in DOM Node, not a user/library Node
+		// (e.g. Slate.js defines its own `Node` interface).
+		const isFromDOMLib =
+			symbol
+				.getDeclarations()
+				?.some((d) => program.isSourceFileDefaultLibrary(d.getSourceFile())) ??
+			false;
+		if (isFromDOMLib) {
+			return true;
+		}
 	}
 
 	// Walk base types recursively. isClassOrInterface() narrows to InterfaceType,
 	// the only kind for which checker.getBaseTypes() is valid.
 	const baseTypes = type.isClassOrInterface() ? checker.getBaseTypes(type) : [];
-	return baseTypes.some((base) => isDOMNodeType(base, checker));
+	return baseTypes.some((base) => isDOMNodeType(base, checker, program));
 }
 
 export type MessageIds = 'noNodeAccess';
@@ -114,7 +131,7 @@ export default createTestingLibraryRule<Options, MessageIds>({
 					const checker = services.program.getTypeChecker();
 					const tsNode = services.esTreeNodeToTSNodeMap.get(node.object);
 					const type = checker.getTypeAtLocation(tsNode);
-					if (!isDOMNodeType(type, checker)) {
+					if (!isDOMNodeType(type, checker, services.program)) {
 						return;
 					}
 				}
