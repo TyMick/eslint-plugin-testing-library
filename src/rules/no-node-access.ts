@@ -1,4 +1,4 @@
-import { ASTUtils } from '@typescript-eslint/utils';
+import { ASTUtils, ESLintUtils } from '@typescript-eslint/utils';
 
 import { createTestingLibraryRule } from '../create-testing-library-rule';
 import {
@@ -14,8 +14,66 @@ import {
 } from '../utils';
 
 import type { TSESTree } from '@typescript-eslint/utils';
+import type { Program, Type, TypeChecker } from 'typescript';
 
 const RULE_NAME = 'no-node-access';
+
+// Common DOM type names that appear frequently in test code. Checking these
+// first short-circuits the recursive base-type walk for the most common cases
+// (e.g. HTMLElement is encountered directly without needing to recurse all the
+// way up from HTMLDivElement → HTMLElement → Element → Node).
+// `Node` must be included so the recursion terminates at the anchor type.
+// All names are still validated against `program.isSourceFileDefaultLibrary`
+// to avoid false matches with identically-named types from user code or
+// third-party libraries (e.g. Slate.js also exports a `Node` interface).
+const DOM_NODE_TYPE_NAMES = new Set([
+	'Node',
+	'Element',
+	'HTMLElement',
+	'SVGElement',
+]);
+
+// `Node` is the abstract base class for all DOM objects that expose traversal
+// properties (children, firstChild, parentNode, etc.). Any object whose type
+// hierarchy includes the DOM `Node` is a genuine DOM node access.
+//
+// `checker.getBaseTypes()` returns only *direct* parent types, so recursion is
+// required to walk up to `Node` from deeply-nested subtypes (e.g.
+// HTMLDivElement → HTMLElement → Element → Node).
+//
+// Base types can be non-interface types (e.g. EventTarget extends an object
+// literal `__type`). The `isClassOrInterface()` guard is therefore necessary
+// before calling `checker.getBaseTypes()`.
+function isDOMNodeType(
+	type: Type,
+	checker: TypeChecker,
+	program: Program
+): boolean {
+	// Handle union types — if any constituent is a DOM type, treat as DOM
+	if (type.isUnion()) {
+		return type.types.some((t) => isDOMNodeType(t, checker, program));
+	}
+
+	const symbol = type.getSymbol() ?? type.aliasSymbol;
+	if (symbol != null && DOM_NODE_TYPE_NAMES.has(symbol.getName())) {
+		// Verify this is a TypeScript built-in DOM type, not a user/library type
+		// with the same name (e.g. Slate.js defines its own `Node` interface).
+		const isFromDOMLib =
+			symbol
+				.getDeclarations()
+				?.some((d) => program.isSourceFileDefaultLibrary(d.getSourceFile())) ??
+			false;
+		if (isFromDOMLib) {
+			return true;
+		}
+	}
+
+	// Walk base types recursively. isClassOrInterface() narrows to InterfaceType,
+	// the only kind for which checker.getBaseTypes() is valid.
+	const baseTypes = type.isClassOrInterface() ? checker.getBaseTypes(type) : [];
+	return baseTypes.some((base) => isDOMNodeType(base, checker, program));
+}
+
 export type MessageIds = 'noNodeAccess';
 export type Options = [{ allowContainerFirstChild: boolean }];
 
@@ -24,7 +82,8 @@ export default createTestingLibraryRule<Options, MessageIds>({
 	meta: {
 		type: 'problem',
 		docs: {
-			description: 'Disallow direct Node access',
+			description:
+				'Disallow direct Node access. When type information is available, only flags actual DOM node access.',
 			recommendedConfig: {
 				dom: 'error',
 				angular: 'error',
@@ -75,6 +134,19 @@ export default createTestingLibraryRule<Options, MessageIds>({
 					(allReturningNode) => allReturningNode === propertyName
 				)
 			) {
+				// Type-aware guard: when TypeScript type information is available, only
+				// report if the object being accessed is actually a DOM Node type.
+				// When type info is not available, fall through to the existing behaviour.
+				const services = ESLintUtils.getParserServices(context, true);
+				if (services.program != null) {
+					const checker = services.program.getTypeChecker();
+					const tsNode = services.esTreeNodeToTSNodeMap.get(node.object);
+					const type = checker.getTypeAtLocation(tsNode);
+					if (!isDOMNodeType(type, checker, services.program)) {
+						return;
+					}
+				}
+
 				if (allowContainerFirstChild && propertyName === 'firstChild') {
 					return;
 				}
