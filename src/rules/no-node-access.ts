@@ -18,6 +18,21 @@ import type { Program, Type, TypeChecker } from 'typescript';
 
 const RULE_NAME = 'no-node-access';
 
+// Common DOM type names that appear frequently in test code. Checking these
+// first short-circuits the recursive base-type walk for the most common cases
+// (e.g. HTMLElement is encountered directly without needing to recurse all the
+// way up from HTMLDivElement → HTMLElement → Element → Node).
+// `Node` must be included so the recursion terminates at the anchor type.
+// All names are still validated against `program.isSourceFileDefaultLibrary`
+// to avoid false matches with identically-named types from user code or
+// third-party libraries (e.g. Slate.js also exports a `Node` interface).
+const DOM_NODE_TYPE_NAMES = new Set([
+	'Node',
+	'Element',
+	'HTMLElement',
+	'SVGElement',
+]);
+
 // `Node` is the abstract base class for all DOM objects that expose traversal
 // properties (children, firstChild, parentNode, etc.). Any object whose type
 // hierarchy includes the DOM `Node` is a genuine DOM node access.
@@ -29,10 +44,6 @@ const RULE_NAME = 'no-node-access';
 // Base types can be non-interface types (e.g. EventTarget extends an object
 // literal `__type`). The `isClassOrInterface()` guard is therefore necessary
 // before calling `checker.getBaseTypes()`.
-//
-// Third-party libraries (e.g. Slate.js) can also define a `Node` type. We
-// distinguish the DOM `Node` from user/library `Node` by checking that its
-// declaration comes from a TypeScript default library file (lib.dom.d.ts).
 function isDOMNodeType(
 	type: Type,
 	checker: TypeChecker,
@@ -44,9 +55,9 @@ function isDOMNodeType(
 	}
 
 	const symbol = type.getSymbol() ?? type.aliasSymbol;
-	if (symbol?.getName() === 'Node') {
-		// Verify this is TypeScript's built-in DOM Node, not a user/library Node
-		// (e.g. Slate.js defines its own `Node` interface).
+	if (symbol != null && DOM_NODE_TYPE_NAMES.has(symbol.getName())) {
+		// Verify this is a TypeScript built-in DOM type, not a user/library type
+		// with the same name (e.g. Slate.js defines its own `Node` interface).
 		const isFromDOMLib =
 			symbol
 				.getDeclarations()
